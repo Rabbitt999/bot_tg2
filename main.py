@@ -7,95 +7,91 @@ TELEGRAM_TOKEN = "8067473611:AAHaIRuXuCF_SCkiGkg-gfHf2zKPOkT_V9g"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
+# Список дозволених магазинів
+ALLOWED_SHOPS = ["rozetka", "prom", "foxtrot", "allo", "yabko", "comfy", "citrus"]
+
 def get_best_prices(query):
-    # Використовуємо двигун google_shopping
     params = {
         "engine": "google_shopping",
         "q": query,
         "location": "Ukraine",
         "hl": "uk",
         "gl": "ua",
-        "direct_link": True, # Намагатися отримати пряме посилання
         "api_key": SERP_API_KEY
     }
 
     search = GoogleSearch(params)
     results = search.get_dict()
     
-    products = []
+    # Словник для зберігання найкращої ціни для кожного магазину (щоб уникнути дублікатів)
+    best_offers = {}
     
-    # Отримуємо результати з торгового пошуку
     if "shopping_results" in results:
         for res in results["shopping_results"]:
-            # Фільтр: шукаємо тільки НОВІ товари
-            # SerpApi зазвичай віддає стан товару в полі 'condition'
+            # 1. Перевірка стану (тільки нове)
             condition = res.get("condition", "new").lower()
-            if "used" in condition or "б/у" in condition or "вжива" in condition:
+            if any(word in condition for word in ["used", "б/у", "вжива", "refurbished"]):
                 continue
 
-            # Список магазинів, які ти вказав (можна розширити)
-            target_shops = ["rozetka", "allo", "comfy", "foxtrot", "prom", "yabko"]
+            # 2. Фільтр по магазинах
             source = res.get("source", "").lower()
+            found_shop = None
+            for shop in ALLOWED_SHOPS:
+                if shop in source:
+                    found_shop = shop
+                    break
             
-            # Перевіряємо, чи магазин є у нашому списку
-            is_target = any(shop in source for shop in target_shops)
+            if not found_shop:
+                continue # Пропускаємо магазин, якщо його немає в списку
 
-            price_str = res.get("price", "Ціну не знайдено")
-            
-            # Очищуємо ціну від символів, щоб можна було сортувати
-            numeric_price = 0
-            if price_str != "Ціну не знайдено":
-                # Видаляємо пробіли, грн, $, тощо
-                clean_price = "".join(filter(str.isdigit, price_str))
-                numeric_price = int(clean_price) if clean_price else 0
+            # 3. Обробка ціни
+            price_str = res.get("price", "0")
+            clean_price = "".join(filter(str.isdigit, price_str))
+            numeric_price = int(clean_price) if clean_price else 9999999
 
-            products.append({
-                "shop": res.get("source", "Магазин"),
-                "title": res.get("title"),
-                "price": price_str,
-                "numeric_price": numeric_price,
-                "link": res.get("link"),
-                "is_target": is_target
-            })
+            # 4. Зберігаємо тільки найдешевшу пропозицію від кожного магазину
+            if found_shop not in best_offers or numeric_price < best_offers[found_shop]['numeric_price']:
+                best_offers[found_shop] = {
+                    "shop": found_shop.capitalize(),
+                    "title": res.get("title"),
+                    "price": price_str,
+                    "numeric_price": numeric_price,
+                    "link": res.get("link")
+                }
 
-    # 1. Сортуємо: спочатку ті магазини, що ми обрали, потім інші
-    # 2. Всередині цих груп сортуємо за ціною (від дешевих до дорогих)
-    products.sort(key=lambda x: (not x['is_target'], x['numeric_price']))
+    # Сортуємо за ціною
+    sorted_offers = sorted(best_offers.values(), key=lambda x: x['numeric_price'])
     
-    return products[:10] # Повертаємо топ-10 результатів
+    return sorted_offers[:5] # Повертаємо топ-5
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "Привіт! Я шукаю тільки НОВУ техніку в магазинах Rozetka, Алло, Comfy та інших. Введіть назву товару:")
+    bot.send_message(message.chat.id, "Привіт! Я знайду найнижчі ціни на **нову** техніку в топ-магазинах (Rozetka, Comfy, Alo тощо).\n\nВведіть назву товару:")
 
 @bot.message_handler(func=lambda message: True)
 def handle_search(message):
     query = message.text
-    msg = bot.send_message(message.chat.id, f"🔎 Шукаю нові {query} за найкращою ціною...")
+    msg = bot.send_message(message.chat.id, f"🔎 Шукаю `{query}` у перевірених магазинах...")
 
     try:
         results = get_best_prices(query)
         
         if not results:
-            bot.edit_message_text("На жаль, нових товарів за цим запитом не знайдено.", message.chat.id, msg.message_id)
+            bot.edit_message_text("На жаль, у вказаних магазинах нічого не знайдено. Спробуйте уточнити назву.", message.chat.id, msg.message_id)
             return
 
-        response_text = f"💰 **Найдешевші нові пропозиції для {query}:**\n\n"
+        response_text = f"✅ **Найдешевші нові пропозиції для:**\n_{query}_\n\n"
         
         for i, res in enumerate(results, 1):
-            shop_name = f"✅ {res['shop']}" if res['is_target'] else res['shop']
-            response_text += f"{i}. **{shop_name}** — `{res['price']}`\n"
-            response_text += f"📦 {res['title']}\n"
-            response_text += f"🔗 [Купити зараз]({res['link']})\n\n"
-
-        # Telegram має ліміт на довжину повідомлення, тому обрізаємо якщо треба
-        if len(response_text) > 4096:
-            response_text = response_text[:4000] + "..."
+            response_text += f"{i}. 🏪 **{res['shop']}**\n"
+            response_text += f"💰 Ціна: `{res['price']}`\n"
+            response_text += f"📦 {res['title'][:60]}...\n"
+            response_text += f"🔗 [ПОСИЛАННЯ НА ТОВАР]({res['link']})\n\n"
 
         bot.edit_message_text(response_text, message.chat.id, msg.message_id, parse_mode="Markdown", disable_web_page_preview=True)
     
     except Exception as e:
         print(f"Error: {e}")
-        bot.edit_message_text("Сталася помилка при пошуку. Спробуйте інший запит.", message.chat.id, msg.message_id)
+        bot.edit_message_text("❌ Сталася помилка. Спробуйте ще раз за хвилину.", message.chat.id, msg.message_id)
 
 bot.polling(none_stop=True)
