@@ -1,112 +1,75 @@
 import telebot
-import requests
+from serpapi import GoogleSearch
 
-# ================== НАЛАШТУВАННЯ ==================
-BOT_TOKEN = "8067473611:AAHaIRuXuCF_SCkiGkg-gfHf2zKPOkT_V9g"
+# Налаштування
 SERP_API_KEY = "5b17fc511645b27655b61507e9fb9c416f87c888a64e5b10e8552478051ff2e3"
+TELEGRAM_TOKEN = "8067473611:AAHaIRuXuCF_SCkiGkg-gfHf2zKPOkT_V9g"
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Список дозволених магазинів
-ALLOWED_SHOPS = ["rozetka", "prom", "foxtrot", "alo", "yablko", "comfy"]
+def get_best_prices(query):
+    # Сайти, на яких ми хочемо шукати
+    shops = "site:rozetka.com.ua OR site:allo.ua OR site:comfy.ua OR site:foxtrot.com.ua OR site:yabko.ua"
+    full_query = f"{query} {shops}"
 
-# ================== ПОШУК ТОВАРУ ==================
-def search_product(query):
-    url = "https://serpapi.com/search.json"
     params = {
-        "engine": "google_shopping",
-        "q": query,
+        "engine": "google",
+        "q": full_query,
+        "location": "Ukraine",
         "hl": "uk",
         "gl": "ua",
+        "google_domain": "google.com.ua",
         "api_key": SERP_API_KEY
     }
 
-    response = requests.get(url, params=params)
-    data = response.json()
+    search = GoogleSearch(params)
+    results = search.get_dict()
+    
+    products = []
+    
+    # Перевіряємо результати "Organic Results"
+    if "organic_results" in results:
+        for res in results["organic_results"][:6]: # Беремо топ-6 результатів
+            # SerpApi часто підтягує ціну в rich_snippet
+            price = "Ціну не знайдено"
+            if "rich_snippet" in res:
+                extension = res["rich_snippet"].get("top", {}).get("detected_extensions", {})
+                if "price" in extension:
+                    price = f"{extension['price']} {extension.get('currency', 'грн')}"
+            
+            products.append({
+                "shop": res.get("displayed_link", "").split('.')[0].replace("https://", ""),
+                "title": res.get("title"),
+                "price": price,
+                "link": res.get("link")
+            })
+    return products
 
-    results = []
-
-    if "shopping_results" not in data:
-        return results
-
-    seen_shops = set()
-
-    for item in data["shopping_results"]:
-        # Тільки нові товари
-        condition = item.get("condition", "").lower()
-        if condition and condition != "new":
-            continue
-
-        title = item.get("title", "No title")
-        price = item.get("price", "N/A")
-
-        # Беремо правильний лінк
-        link = item.get("link") or item.get("product_link") or item.get("merchant_link") or ""
-        source = item.get("source", "Unknown shop")
-
-        # Переводимо назву магазину в нижній регістр
-        source_lower = source.lower()
-
-        # Фільтруємо лише дозволені магазини
-        if not any(shop in source_lower for shop in ALLOWED_SHOPS):
-            continue
-
-        # Не повторювати магазини
-        if source_lower in seen_shops:
-            continue
-        seen_shops.add(source_lower)
-
-        # Фільтр Б/У і Refurbished
-        if "бу" in title.lower() or "used" in title.lower() or "refurb" in title.lower():
-            continue
-
-        results.append({
-            "title": title,
-            "price": price,
-            "link": link,
-            "source": source
-        })
-
-    return results
-
-# ================== ЦІНА → FLOAT ==================
-def parse_price(price_str):
-    try:
-        return float(price_str.replace("₴", "").replace("грн", "").replace(" ", "").replace(",", "."))
-    except:
-        return 9999999
-
-# ================== /start ==================
-@bot.message_handler(commands=["start"])
+@bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(
-        message.chat.id,
-        "🔎 Напиши назву товару (наприклад: iPhone 15 Pro)\n"
-        "Я знайду де дешевше в Україні серед Rozetka, Prom, Foxtrot, Alo, Yablko та Comfy."
-    )
+    bot.send_message(message.chat.id, "Привіт! Напиши назву техніки, і я знайду ціни через SerpApi.")
 
-# ================== ПОШУК ==================
 @bot.message_handler(func=lambda message: True)
 def handle_search(message):
     query = message.text
-    bot.send_message(message.chat.id, f"🔍 Шукаю: {query}...")
+    msg = bot.send_message(message.chat.id, "🔍 Аналізую ринок...")
 
-    results = search_product(query)
+    try:
+        results = get_best_prices(query)
+        
+        if not results:
+            bot.edit_message_text("Нічого не знайдено за цим запитом.", message.chat.id, msg.message_id)
+            return
 
-    if not results:
-        bot.send_message(message.chat.id, "❌ Нічого не знайдено серед дозволених магазинів")
-        return
+        response_text = f"💰 **Ціни на {query}:**\n\n"
+        for i, res in enumerate(results, 1):
+            response_text += f"{i}. **{res['shop'].capitalize()}** — {res['price']}\n"
+            response_text += f"📦 {res['title']}\n"
+            response_text += f"🔗 [Перейти до магазину]({res['link']})\n\n"
 
-    # Сортуємо по ціні
-    results.sort(key=lambda x: parse_price(x["price"]))
+        bot.edit_message_text(response_text, message.chat.id, msg.message_id, parse_mode="Markdown", disable_web_page_preview=True)
+    
+    except Exception as e:
+        bot.edit_message_text(f"Сталася помилка: {e}", message.chat.id, msg.message_id)
 
-    text = f"📱 {query}\n\n💸 Пропозиції:\n"
-
-    for item in results:
-        text += f"{item['source']}\n{item['link']}\n\n"
-
-    bot.send_message(message.chat.id, text)
-
-# ================== ЗАПУСК ==================
-print("✅ Bot started...")
 bot.polling(none_stop=True)
