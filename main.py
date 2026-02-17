@@ -6,7 +6,6 @@ import time
 import threading
 from datetime import datetime, timedelta
 from telebot import types
-import re
 
 # ================== НАЛАШТУВАННЯ ==================
 BOT_TOKEN = "8538688126:AAFSWM16hONLKwObwnujl-dPnqJ_yu5XLLU"
@@ -173,6 +172,16 @@ def get_user(uid, first_name="Користувач"):
     return data["users"][uid]
 
 
+def update_user(uid, user_data):
+    """Оновлює дані користувача в базі"""
+    data = load_db()
+    uid = str(uid)
+    if uid in data["users"]:
+        data["users"][uid] = user_data
+        save_db(data)
+    return user_data
+
+
 def add_premium_days(uid, days):
     data = load_db()
     uid = str(uid)
@@ -238,45 +247,15 @@ def format_rating(rating):
 
 # ================== ЛОГІКА GROQ (AI) ==================
 
-def get_enhanced_search_data(user_input):
-    """
-    Виконує один запит до Groq для отримання:
-    - виправленого пошукового запиту
-    - емодзі для категорії товару
-    """
+def get_refined_query(user_input):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
     prompt = f"""
     Користувач шукає товар: "{user_input}"
-
-    Проаналізуй цей запит і виконай наступні завдання:
-    1. Зроби ідеальний короткий пошуковий запит для Google Shopping (марка, модель, ключові слова)
-    2. Визнач категорію товару та підбери відповідне емодзі для його позначення
-
-    Правила підбору емодзі:
-    - Телефони, смартфони: 📱
-    - Навушники, гарнітури: 🎧
-    - Ноутбуки, комп'ютери: 💻
-    - Планшети: 📱
-    - Телевізори: 📺
-    - Фотоапарати, камери: 📷
-    - Ігри, консолі: 🎮
-    - Годинники: ⌚
-    - Одяг, взуття: 👕 (для одягу), 👟 (для взуття)
-    - Книги: 📚
-    - Музичні інструменти: 🎸
-    - Автотовари: 🚗
-    - Меблі: 🪑
-    - Спорттовари: ⚽
-    - Продукти харчування: 🍕
-    - Інше (якщо не підходить під жодну категорію): 📦
-
+    Твоє завдання: Зроби ідеальний короткий пошуковий запит для Google Shopping (марка, модель).
     Відповідь надішли СУВОРО у форматі JSON:
-    {{
-        "query": "виправлений пошуковий запит",
-        "emoji": "підібране емодзі"
-    }}
+    {{"query": "виправлений запит"}}
     """
 
     data = {
@@ -289,17 +268,9 @@ def get_enhanced_search_data(user_input):
     try:
         response = requests.post(url, headers=headers, json=data, timeout=10)
         res_json = response.json()['choices'][0]['message']['content']
-        result = json.loads(res_json)
-        return {
-            "query": result.get("query", user_input),
-            "emoji": result.get("emoji", "📦")
-        }
+        return json.loads(res_json).get("query", user_input)
     except:
-        # У випадку помилки повертаємо стандартні значення
-        return {
-            "query": user_input,
-            "emoji": "📦"
-        }
+        return user_input
 
 
 # ================== ЛОГІКА ПОШУКУ ==================
@@ -327,6 +298,7 @@ def extract_rating(item):
         if "rating" in ext.lower():
             try:
                 # Шукаємо число в рядку
+                import re
                 numbers = re.findall(r"(\d+\.?\d*)", ext)
                 if numbers:
                     return float(numbers[0])
@@ -420,7 +392,7 @@ def profile(message):
         return
 
     uid_str = str(uid)
-    user = get_user(uid, message.from_user.first_name)
+    user = get_user(uid, message.from_user.first_name)  # Отримуємо актуальні дані з бази
     cart = get_user_cart(uid)
 
     prem_status = "Неактивний❌"
@@ -510,7 +482,7 @@ def back_to_profile(call):
     uid = call.from_user.id
 
     uid_str = str(uid)
-    user = get_user(uid)
+    user = get_user(uid)  # Отримуємо актуальні дані з бази
     cart = get_user_cart(uid)
 
     prem_status = "Неактивний❌"
@@ -653,6 +625,7 @@ def handle_search_logic(message):
     if message.text in ["👤 Мій профіль", "💎 Купити Premium", "⚙️ Повідомити про помилку", "📊 Адмін Статистика"]:
         return
 
+    # Отримуємо актуальні дані користувача
     user = get_user(uid, message.from_user.first_name)
     db = load_db()
 
@@ -680,14 +653,7 @@ def handle_search_logic(message):
         search_query_text = message.text
         status_msg = bot.send_message(message.chat.id, f"🔍 Шукаю {search_query_text}\n{get_progress_bar(20)}")
 
-        # Отримуємо покращені дані пошуку (запит + емодзі) одним запитом до Groq
-        enhanced_data = get_enhanced_search_data(search_query_text)
-        refined_query = enhanced_data["query"]
-        category_emoji = enhanced_data["emoji"]
-
-        # Зберігаємо емодзі в стані користувача для подальшого використання
-        user_states[f"last_emoji_{uid}"] = category_emoji
-
+        refined_query = get_refined_query(search_query_text)
         bot.edit_message_text(f"🔍 Шукаю {refined_query}\n{get_progress_bar(40)}", message.chat.id,
                               status_msg.message_id)
 
@@ -706,7 +672,7 @@ def handle_search_logic(message):
         res_text = f"🔎 <b>Результати пошуку</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
         for i, item in enumerate(results, 1):
             res_text += f"{i}️⃣ <b>{item['source']}</b> — <b>{item['price']}</b>\n"
-            res_text += f"{category_emoji} {item['title'][:60]}...\n"
+            res_text += f"📦 {item['title'][:60]}...\n"
             if item['rating_text']:
                 res_text += f"{item['rating_text']}\n"
             res_text += f"<a href='{item['link']}'>👉 Перейти</a>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
@@ -715,9 +681,12 @@ def handle_search_logic(message):
                               status_msg.message_id)
         time.sleep(0.4)
 
+        # Оновлюємо дані користувача
         user["searches_today"] += 1
         user["total_searches"] += 1
         db["total_searches_month"] += 1
+
+        # Зберігаємо оновлені дані
         save_db(db)
 
         # Додаємо кнопку "Додати в кошик" під результатами
@@ -749,7 +718,6 @@ def handle_search_logic(message):
 def show_add_to_cart(call):
     uid = call.from_user.id
     last_results = user_states.get(f"last_search_{uid}", [])
-    category_emoji = user_states.get(f"last_emoji_{uid}", "📦")
 
     if not last_results:
         bot.answer_callback_query(call.id, "❌ Спочатку виконайте пошук", show_alert=True)
@@ -807,7 +775,6 @@ def add_to_cart_callback(call):
 def back_to_results(call):
     uid = call.from_user.id
     last_results = user_states.get(f"last_search_{uid}", [])
-    category_emoji = user_states.get(f"last_emoji_{uid}", "📦")
 
     if not last_results:
         bot.answer_callback_query(call.id, "❌ Результати пошуку застаріли", show_alert=True)
@@ -816,7 +783,7 @@ def back_to_results(call):
     res_text = f"🔎 <b>Результати пошуку</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n"
     for i, item in enumerate(last_results, 1):
         res_text += f"{i}️⃣ <b>{item['source']}</b> — <b>{item['price']}</b>\n"
-        res_text += f"{category_emoji} {item['title'][:60]}...\n"
+        res_text += f"📦 {item['title'][:60]}...\n"
         if item['rating_text']:
             res_text += f"{item['rating_text']}\n"
         res_text += f"<a href='{item['link']}'>👉 Перейти</a>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
