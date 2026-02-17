@@ -335,16 +335,36 @@ def search_product(query):
 # ================== КЛАВІАТУРА ==================
 
 def get_main_menu(uid):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add(
-        types.KeyboardButton("👤 Мій профіль"),
-        types.KeyboardButton("💎 Купити Premium")
-    )
-    markup.add(
-        types.KeyboardButton("⚙️ Повідомити про помилку")
-    )
+    """Повертає список кнопок для головного меню"""
+    buttons = ["👤 Мій профіль", "⚙️ Повідомити про помилку"]
     if uid == ADMIN_ID:
-        markup.add(types.KeyboardButton("📊 Адмін Статистика"))
+        buttons.append("📊 Адмін Статистика")
+    return buttons
+
+
+def create_main_keyboard(uid):
+    """Створює клавіатуру з кнопкою пошуку та іншими кнопками"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+
+    # Спочатку додаємо кнопку пошуку
+    markup.add(types.KeyboardButton("🔍 Пошук товарів"))
+
+    # Потім додаємо інші кнопки в рядках по 2
+    other_buttons = get_main_menu(uid)
+    if other_buttons:
+        # Якщо кнопок більше 2, розбиваємо на ряди
+        if len(other_buttons) == 2:
+            markup.row(
+                types.KeyboardButton(other_buttons[0]),
+                types.KeyboardButton(other_buttons[1])
+            )
+        elif len(other_buttons) == 3:
+            markup.row(
+                types.KeyboardButton(other_buttons[0]),
+                types.KeyboardButton(other_buttons[1])
+            )
+            markup.row(types.KeyboardButton(other_buttons[2]))
+
     return markup
 
 
@@ -379,7 +399,63 @@ def start(message):
                 pass
             bot.send_message(uid, f"🎁 Ви отримали 3 діб Premium за запрошення!", parse_mode="HTML")
 
-    bot.send_message(uid, "🔎 Напишіть назву товару для пошуку найкращої ціни.", reply_markup=get_main_menu(uid))
+    bot.send_message(
+        uid,
+        "🔎 Натисніть кнопку пошуку, щоб знайти товар за найкращою ціною.",
+        reply_markup=create_main_keyboard(uid)
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "🔍 Пошук товарів")
+def search_button_handler(message):
+    uid = message.from_user.id
+
+    can_click, block_time = check_anti_spam(uid)
+    if not can_click:
+        bot.send_message(uid, f"⚠️ Ви відправили забагато повідомлень! Зачекайте {block_time} секунд.")
+        return
+
+    # Встановлюємо стан пошуку для користувача
+    user_states[uid] = "waiting_for_search"
+
+    # Створюємо інлайн кнопку для скасування
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Відмінити пошук", callback_data="cancel_search"))
+
+    bot.send_message(
+        uid,
+        "🔎 Напишіть назву товару для пошуку найкращої ціни.\n\n"
+        "Натисніть /cancel щоб відмінити пошук.",
+        reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "cancel_search")
+def cancel_search_callback(call):
+    uid = call.from_user.id
+
+    # Видаляємо стан пошуку
+    if uid in user_states:
+        del user_states[uid]
+
+    bot.edit_message_text(
+        "❌ Пошук скасовано.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+
+    bot.send_message(uid, "Оберіть дію:", reply_markup=create_main_keyboard(uid))
+
+
+@bot.message_handler(commands=['cancel'])
+def cancel_command(message):
+    uid = message.from_user.id
+
+    # Видаляємо стан пошуку
+    if uid in user_states:
+        del user_states[uid]
+
+    bot.send_message(uid, "❌ Пошук скасовано.", reply_markup=create_main_keyboard(uid))
 
 
 @bot.message_handler(func=lambda m: m.text == "👤 Мій профіль")
@@ -392,7 +468,7 @@ def profile(message):
         return
 
     uid_str = str(uid)
-    user = get_user(uid, message.from_user.first_name)  # Отримуємо актуальні дані з бази
+    user = get_user(uid, message.from_user.first_name)
     cart = get_user_cart(uid)
 
     prem_status = "Неактивний❌"
@@ -424,12 +500,37 @@ def profile(message):
         f"Ваше реферальне посилання:\n<code>{ref_link}</code>"
     )
 
-    # Додаємо кнопку "Мій кошик" під текстом профілю
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart_from_profile"))
+    # Додаємо кнопки "Купити Premium" та "Мій кошик" під текстом профілю
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💎 Купити Premium", callback_data="buy_premium_from_profile"),
+        types.InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart_from_profile")
+    )
 
     bot.send_message(message.chat.id, profile_text, parse_mode="HTML", disable_web_page_preview=True,
                      reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "buy_premium_from_profile")
+def buy_premium_from_profile(call):
+    uid = call.from_user.id
+
+    can_click, block_time = check_anti_spam(uid)
+    if not can_click:
+        bot.answer_callback_query(call.id, f"⚠️ Зачекайте {block_time} секунд!", show_alert=True)
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton(f"Оплатити {STARS_AMOUNT} ⭐️", callback_data="pay_stars")
+    )
+
+    bot.edit_message_text(
+        "💎 Оплата Premium на 30 днів:",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
+    )
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "show_cart_from_profile")
@@ -482,7 +583,7 @@ def back_to_profile(call):
     uid = call.from_user.id
 
     uid_str = str(uid)
-    user = get_user(uid)  # Отримуємо актуальні дані з бази
+    user = get_user(uid)
     cart = get_user_cart(uid)
 
     prem_status = "Неактивний❌"
@@ -515,8 +616,11 @@ def back_to_profile(call):
         f"Ваше реферальне посилання:\n<code>{ref_link}</code>"
     )
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart_from_profile"))
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💎 Купити Premium", callback_data="buy_premium_from_profile"),
+        types.InlineKeyboardButton("🛒 Мій кошик", callback_data="show_cart_from_profile")
+    )
 
     bot.edit_message_text(
         profile_text,
@@ -565,27 +669,6 @@ def handle_report(message):
     bot.send_message(message.chat.id, "✅ Дякуємо! Репорт надіслано.")
 
 
-@bot.message_handler(func=lambda m: m.text == "💎 Купити Premium")
-def buy_prem(message):
-    uid = message.from_user.id
-
-    can_click, block_time = check_anti_spam(uid)
-    if not can_click:
-        bot.send_message(uid, f"⚠️ Ви відправили забагато повідомлень! Зачекайте {block_time} секунд.")
-        return
-
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        types.InlineKeyboardButton(f"Оплатити {STARS_AMOUNT} ⭐️", callback_data="pay_stars")
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "💎 Оберіть спосіб оплати Premium на 30 днів:",
-        reply_markup=markup
-    )
-
-
 @bot.message_handler(func=lambda m: m.text == "📊 Адмін Статистика" and m.from_user.id == ADMIN_ID)
 def admin_stat(message):
     uid = message.from_user.id
@@ -608,7 +691,7 @@ def admin_stat(message):
 
 # ================== ГОЛОВНА ЛОГІКА ПОШУКУ ==================
 
-@bot.message_handler(func=lambda m: True, content_types=['text'])
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id) == "waiting_for_search", content_types=['text'])
 def handle_search_logic(message):
     uid = message.from_user.id
 
@@ -621,9 +704,9 @@ def handle_search_logic(message):
         bot.send_message(uid, "⚠️ Зачекайте, попередній пошук ще триває!")
         return
 
-    # Перевіряємо чи це не команда з меню
-    if message.text in ["👤 Мій профіль", "💎 Купити Premium", "⚙️ Повідомити про помилку", "📊 Адмін Статистика"]:
-        return
+    # Видаляємо стан пошуку після отримання запиту
+    if uid in user_states:
+        del user_states[uid]
 
     # Отримуємо актуальні дані користувача
     user = get_user(uid, message.from_user.first_name)
